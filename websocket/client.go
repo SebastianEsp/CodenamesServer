@@ -2,7 +2,7 @@ package websocket
 
 import (
 	"bytes"
-	"chaoticneutraltech/codenames/codenames"
+	game "chaoticneutraltech/codenames/codenames"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -26,6 +26,8 @@ const (
 	maxMessageSize = 512
 )
 
+var instance *game.Game
+
 var (
 	newline = []byte{'\n'}
 	space   = []byte{' '}
@@ -38,7 +40,12 @@ var upgrader = websocket.Upgrader{
 
 type Message struct {
 	MsgType string `json:"MsgType"`
-	Data    string `json:"Data"`
+	Data    Data   `json:"Data"`
+}
+
+type Data struct {
+	Message  string        `json:"Message,omitempty"`
+	Codename game.Codename `json:"Codename,omitempty"`
 }
 
 // Client is a middleman between the websocket connection and the hub.
@@ -74,24 +81,12 @@ func (c *Client) readPump() {
 			break
 		}
 
-		msg := &Message{}
-
-		// read in a message
-		err = json.Unmarshal(message, &msg)
+		reply, err := msgHandler(message)
 		if err != nil {
-			log.Println(err)
+			log.Printf("error: %v", err)
 		}
 
-		switch msg.MsgType {
-		case "ChatMsg":
-			message = bytes.TrimSpace(bytes.Replace([]byte(msg.Data), newline, space, -1))
-		case "BoardState":
-			fmt.Println("BOARD STATE WAS SENT")
-		}
-
-		fmt.Println(string(message))
-
-		c.hub.broadcast <- message
+		c.hub.broadcast <- reply
 	}
 }
 
@@ -121,12 +116,11 @@ func (c *Client) writePump() {
 				return
 			}
 
-			msg := struct {
-				MsgType string
-				Data    string
-			}{
-				"ChatMsg",
-				string(message),
+			msg := &Message{}
+			// read in a message
+			err = json.Unmarshal(message, &msg)
+			if err != nil {
+				log.Printf("error: %v", err)
 			}
 
 			m, err := json.Marshal(msg)
@@ -134,7 +128,7 @@ func (c *Client) writePump() {
 				log.Println(err)
 			}
 
-			//fmt.Println(string(m))
+			fmt.Println(string(m))
 
 			w.Write([]byte(m))
 
@@ -159,6 +153,61 @@ func (c *Client) writePump() {
 	}
 }
 
+func msgHandler(message []byte) ([]byte, error) {
+	msg := &Message{}
+
+	// read in a message
+	err := json.Unmarshal(message, &msg)
+	if err != nil {
+		return nil, err
+	}
+
+	switch msg.MsgType {
+	case "ChatMsg":
+		fmt.Println("ChatMsg:")
+		fmt.Println(string(message))
+		message = bytes.TrimSpace(bytes.Replace([]byte(message), newline, space, -1))
+	case "UpdateState":
+		fmt.Println("UpdateState:")
+		fmt.Println(string(message))
+
+		x, y := msg.Data.Codename.PosX, msg.Data.Codename.PosY
+
+		instance.Board.Codenames[msg.Data.Codename.PosX][msg.Data.Codename.PosY].State.Guessed = msg.Data.Codename.State.Guessed
+		instance.Board.Codenames[msg.Data.Codename.PosX][msg.Data.Codename.PosY].State.GuessedBy = msg.Data.Codename.State.GuessedBy
+
+		switch msg.Data.Codename.State.GuessedBy {
+		case "Red":
+			if instance.Board.Codenames[x][y].Agent == "Red" {
+				instance.GameState.RedPoints++
+			} else if instance.Board.Codenames[x][y].Agent == "Blue" {
+				instance.GameState.BluePoints++
+			} else if instance.Board.Codenames[x][y].Agent == "Assassin" {
+				instance.GameState.Ended = true
+				instance.GameState.Winner = game.TeamBlue.String()
+			}
+		case "Blue":
+			if instance.Board.Codenames[x][y].Agent == "Blue" {
+				instance.GameState.BluePoints++
+			} else if instance.Board.Codenames[x][y].Agent == "Red" {
+				instance.GameState.RedPoints++
+			} else if instance.Board.Codenames[x][y].Agent == "Assassin" {
+				instance.GameState.Ended = true
+				instance.GameState.Winner = game.TeamRed.String()
+			}
+		}
+
+		data := Data{Message: "", Codename: instance.Board.Codenames[x][y]}
+		m := Message{MsgType: "UpdateState", Data: data}
+		message, err = json.Marshal(m)
+		if err != nil {
+			log.Println(err)
+		}
+	}
+
+	return message, nil
+}
+
 // serveWs handles websocket requests from the peer.
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	upgrader.CheckOrigin = func(r *http.Request) bool { return true }
@@ -170,8 +219,8 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
 	client.hub.register <- client
 
-	game := codenames.CreateGame(codenames.GenerateBoard(codenames.TeamRed), codenames.TeamRed)
-	g, err := json.Marshal(game)
+	instance = game.NewGame(game.TeamRed)
+	g, err := json.Marshal(instance)
 	if err != nil {
 		log.Println(err)
 	}
